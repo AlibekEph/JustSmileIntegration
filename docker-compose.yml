@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ident_amocrm_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - ident_network
+
+  sync:
+    build: .
+    container_name: ident_amocrm_sync
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./DB:/app/DB:ro  # Mount database dump as read-only
+    depends_on:
+      - redis
+    networks:
+      - ident_network
+    command: python main.py sync
+
+  auth:
+    build: .
+    container_name: ident_amocrm_auth
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    networks:
+      - ident_network
+    command: python main.py auth
+    profiles:
+      - auth
+
+volumes:
+  redis_data:
+
+networks:
+  ident_network:
+    driver: bridge 

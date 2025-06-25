@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ident_test_db
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=TestPassword123!
+      - MSSQL_PID=Express
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+      - ./test_data:/test_data
+    networks:
+      - test_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ident_test_redis
+    networks:
+      - test_network
+
+  test_app:
+    build: .
+    container_name: ident_test_app
+    environment:
+      - DB_HOST=sqlserver
+      - DB_PORT=1433
+      - DB_NAME=PZ
+      - DB_USER=sa
+      - DB_PASSWORD=TestPassword123!
+      - DB_DRIVER={ODBC Driver 18 for SQL Server}
+      - AMOCRM_SUBDOMAIN=test_subdomain
+      - AMOCRM_CLIENT_ID=test_client_id
+      - AMOCRM_CLIENT_SECRET=test_client_secret
+      - AMOCRM_REDIRECT_URI=http://localhost:8080/callback
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SYNC_INTERVAL_MINUTES=2
+      - BATCH_SIZE=10
+      - LOG_LEVEL=DEBUG
+      - USE_MOCK_AMOCRM=true
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - sqlserver
+      - redis
+    networks:
+      - test_network
+    command: python main.py test-integration
+    profiles:
+      - test
+
+volumes:
+  sqlserver_data:
+
+networks:
+  test_network:
+    driver: bridge 
