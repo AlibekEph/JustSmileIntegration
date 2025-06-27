@@ -1,28 +1,79 @@
 # Core dependencies
-python-dotenv==1.0.0
-pyodbc==4.0.39
-pymssql==2.2.8
-redis==4.5.5
 requests==2.31.0
+loguru==0.7.2
+schedule==1.2.0
+redis==5.0.1
 pytz==2023.3
-pydantic==2.4.2
+pyodbc==5.0.1
+flask==3.0.0
+python-dotenv==1.0.0
+python-dateutil==2.8.2
+
+# Pydantic with settings
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Async support
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# Development and testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0
+mock==5.1.0
+
+# Rate limiting
+ratelimit==2.2.1
+
+# JSON handling
+simplejson==3.19.2
+
+# HTTP client alternatives
+httpx==0.25.2
+
+# Additional utilities
+click==8.1.7
+rich==13.7.0
+colorama==0.4.6
+tqdm==4.66.1
+
+# For better datetime handling
+arrow==1.3.0
+
+# Memory optimization
+psutil==5.9.6
+memory-profiler==0.61.0
+
+# For data validation
+marshmallow==3.20.1
+
+# Database utilities
+sqlparse==0.4.4
+
+# OAuth handling
+oauthlib==3.2.2
+requests-oauthlib==1.3.1
+
+# Database ORM (optional)
+sqlalchemy==2.0.20
+
+# Type hints
+typing-extensions==4.7.1
 
 # Web framework for OAuth callback
-flask==2.3.3
+flask==3.0.0
 
 # Scheduling
 schedule==1.2.0
 
 # Logging
-loguru==0.7.0
-
-# Database
-sqlalchemy==2.0.20
+loguru==0.7.2
 
 # Testing
-pytest==7.4.0
+pytest==7.4.3
 pytest-asyncio==0.21.1
-pytest-mock==3.11.1
+pytest-mock==3.12.0
 
 # Type hints
 typing-extensions==4.7.1
@@ -30,9 +81,36 @@ typing-extensions==4.7.1
 # Date handling
 python-dateutil==2.8.2
 
-# Rate limiting
-ratelimit==2.2.1
+# Optional dependencies for enhanced functionality
+psutil==5.9.6
+colorama==0.4.6
+tqdm==4.66.1
 
-# OAuth handling
-oauthlib==3.2.2
-requests-oauthlib==1.3.1 
+# JSON handling
+simplejson==3.19.2
+
+# HTTP client alternatives
+httpx==0.25.2
+
+# Configuration management
+configparser==6.0.0
+
+# Additional utilities
+click==8.1.7
+rich==13.7.0
+
+# For better datetime handling
+arrow==1.3.0
+
+# Memory optimization
+memory-profiler==0.61.0
+
+# For data validation
+marshmallow==3.20.1
+
+# Database utilities
+sqlparse==0.4.4
+
+# New dependencies
+aiohttp==3.9.1
+asyncio==3.4.3 

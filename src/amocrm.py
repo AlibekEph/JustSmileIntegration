@@ -8,7 +8,8 @@ import requests
 from loguru import logger
 import redis
 
-from config import amocrm_config, redis_config, app_config
+from config import amocrm_config, redis_config, app_config, AMOCRM_CONFIG, FIELD_MAPPING
+from src.models import ContactSearchResult, FunnelType
 
 
 class AmoCRMClient:
@@ -143,6 +144,219 @@ class AmoCRMClient:
             logger.error(f"Failed to refresh token: {e}")
             return False
     
+    def find_deal_by_reception_id(self, reception_id: int) -> Optional[ContactSearchResult]:
+        """Find deal by reception ID (primary search key)."""
+        logger.debug(f"Searching for deal with reception ID: {reception_id}")
+        
+        # Search in both primary and secondary pipelines
+        pipelines = [AMOCRM_CONFIG["primary_pipeline_id"], AMOCRM_CONFIG["secondary_pipeline_id"]]
+        
+        for pipeline_id in pipelines:
+            result = self._search_deals_by_custom_field(
+                field_id=FIELD_MAPPING["reception_id"],
+                value=str(reception_id),
+                pipeline_id=pipeline_id
+            )
+            if result:
+                result.reception_id = reception_id
+                return result
+        
+        logger.debug(f"No deal found with reception ID: {reception_id}")
+        return None
+    
+    def find_deal_by_patient_number(self, patient_number: str) -> Optional[ContactSearchResult]:
+        """Find deal by patient number (secondary search key)."""
+        logger.debug(f"Searching for deal with patient number: {patient_number}")
+        
+        # Search in both pipelines for deals with empty reception_id
+        pipelines = [AMOCRM_CONFIG["primary_pipeline_id"], AMOCRM_CONFIG["secondary_pipeline_id"]]
+        
+        for pipeline_id in pipelines:
+            result = self._search_deals_by_patient_number_empty_reception(
+                patient_number=patient_number,
+                pipeline_id=pipeline_id
+            )
+            if result:
+                result.patient_number = patient_number
+                return result
+        
+        logger.debug(f"No deal found with patient number: {patient_number}")
+        return None
+    
+    def find_contact_by_phone(self, phone: str) -> Optional[ContactSearchResult]:
+        """Find contact by phone number (tertiary search key)."""
+        logger.debug(f"Searching for contact with phone: {phone}")
+        
+        contact = self.get_contact_by_phone(phone)
+        if contact:
+            # Check if contact has deals in target pipelines
+            deals = self._get_contact_deals(contact['id'])
+            target_deals = self._filter_deals_by_pipelines_and_stages(deals)
+            
+            if target_deals:
+                deal = target_deals[0]  # Take first active deal
+                return ContactSearchResult(
+                    contact_id=contact['id'],
+                    deal_id=deal['id'],
+                    pipeline_id=deal['pipeline_id'],
+                    stage_id=deal['status_id'],
+                    phone=phone
+                )
+            else:
+                # Contact exists but no active deals
+                return ContactSearchResult(
+                    contact_id=contact['id'],
+                    phone=phone
+                )
+        
+        logger.debug(f"No contact found with phone: {phone}")
+        return None
+    
+    def _search_deals_by_custom_field(self, field_id: int, value: str, pipeline_id: int) -> Optional[ContactSearchResult]:
+        """Search deals by custom field value in specific pipeline."""
+        params = {
+            'filter[pipeline_id]': pipeline_id,
+            'filter[custom_fields_values]': f"{field_id}={value}",
+            'with': 'contacts'
+        }
+        
+        try:
+            response = self._make_request('GET', 'leads', params=params)
+            deals = response.get('_embedded', {}).get('leads', [])
+            
+            # Filter deals not in excluded stages
+            active_deals = [deal for deal in deals if deal['status_id'] not in AMOCRM_CONFIG["excluded_stages"]]
+            
+            if active_deals:
+                deal = active_deals[0]
+                contacts = deal.get('_embedded', {}).get('contacts', [])
+                contact_id = contacts[0]['id'] if contacts else None
+                
+                return ContactSearchResult(
+                    contact_id=contact_id,
+                    deal_id=deal['id'],
+                    pipeline_id=deal['pipeline_id'],
+                    stage_id=deal['status_id']
+                )
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to search deals by custom field: {e}")
+            return None
+    
+    def _search_deals_by_patient_number_empty_reception(self, patient_number: str, pipeline_id: int) -> Optional[ContactSearchResult]:
+        """Search deals by patient number where reception_id is empty."""
+        params = {
+            'filter[pipeline_id]': pipeline_id,
+            'with': 'contacts'
+        }
+        
+        try:
+            response = self._make_request('GET', 'leads', params=params)
+            deals = response.get('_embedded', {}).get('leads', [])
+            
+            # Filter deals manually for empty reception_id and matching patient_number
+            for deal in deals:
+                if deal['status_id'] in AMOCRM_CONFIG["excluded_stages"]:
+                    continue
+                
+                custom_fields = deal.get('custom_fields_values', [])
+                has_reception_id = False
+                has_patient_number = False
+                
+                for field in custom_fields:
+                    if field['field_id'] == FIELD_MAPPING["reception_id"]:
+                        # Check if reception_id is empty or None
+                        values = field.get('values', [])
+                        if values and values[0].get('value'):
+                            has_reception_id = True
+                            break
+                    elif field['field_id'] == FIELD_MAPPING["patient_number"]:
+                        values = field.get('values', [])
+                        if values and str(values[0].get('value', '')) == str(patient_number):
+                            has_patient_number = True
+                
+                # Deal should have patient_number but no reception_id
+                if has_patient_number and not has_reception_id:
+                    contacts = deal.get('_embedded', {}).get('contacts', [])
+                    contact_id = contacts[0]['id'] if contacts else None
+                    
+                    return ContactSearchResult(
+                        contact_id=contact_id,
+                        deal_id=deal['id'],
+                        pipeline_id=deal['pipeline_id'],
+                        stage_id=deal['status_id']
+                    )
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to search deals by patient number: {e}")
+            return None
+    
+    def _get_contact_deals(self, contact_id: int) -> List[Dict[str, Any]]:
+        """Get all deals for a contact."""
+        params = {
+            'filter[contacts]': contact_id
+        }
+        
+        try:
+            response = self._make_request('GET', 'leads', params=params)
+            return response.get('_embedded', {}).get('leads', [])
+        except Exception as e:
+            logger.error(f"Failed to get contact deals: {e}")
+            return []
+    
+    def _filter_deals_by_pipelines_and_stages(self, deals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter deals by target pipelines and active stages."""
+        target_pipelines = [AMOCRM_CONFIG["primary_pipeline_id"], AMOCRM_CONFIG["secondary_pipeline_id"]]
+        excluded_stages = AMOCRM_CONFIG["excluded_stages"]
+        
+        return [
+            deal for deal in deals
+            if deal['pipeline_id'] in target_pipelines
+            and deal['status_id'] not in excluded_stages
+        ]
+    
+    def create_deal(self, deal_data: Dict[str, Any], contact_id: Optional[int] = None) -> Optional[int]:
+        """Create new deal in AmoCRM."""
+        try:
+            if contact_id:
+                deal_data['_embedded'] = {
+                    'contacts': [{'id': contact_id}]
+                }
+            
+            # Set responsible user if configured
+            if AMOCRM_CONFIG.get("responsible_user_id"):
+                deal_data['responsible_user_id'] = AMOCRM_CONFIG["responsible_user_id"]
+            
+            response = self._make_request('POST', 'leads', data=[deal_data])
+            deals = response.get('_embedded', {}).get('leads', [])
+            
+            if deals:
+                deal_id = deals[0].get('id')
+                logger.info(f"Created deal with ID: {deal_id}")
+                return deal_id
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to create deal: {e}")
+            return None
+    
+    def update_deal(self, deal_id: int, deal_data: Dict[str, Any]) -> bool:
+        """Update existing deal in AmoCRM."""
+        try:
+            deal_data['id'] = deal_id
+            self._make_request('PATCH', f'leads/{deal_id}', data=deal_data)
+            logger.info(f"Updated deal with ID: {deal_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update deal {deal_id}: {e}")
+            return False
+    
     def get_contact_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
         """Find contact by phone number."""
         params = {
@@ -158,7 +372,7 @@ class AmoCRMClient:
             for contact in contacts:
                 custom_fields = contact.get('custom_fields_values', [])
                 for field in custom_fields:
-                    if field.get('field_id') == 2:  # Phone field ID
+                    if field.get('field_id') == FIELD_MAPPING["phone"]:
                         for value in field.get('values', []):
                             if self._normalize_phone(value.get('value', '')) == self._normalize_phone(phone):
                                 return contact
@@ -230,9 +444,9 @@ class AmoCRMClient:
         phone = None
         
         for field in patient_data.get('custom_fields_values', []):
-            if field['field_id'] == 25:  # Patient ID field
+            if field['field_id'] == FIELD_MAPPING["patient_id"]:
                 patient_id = field['values'][0]['value']
-            elif field['field_id'] == 2:  # Phone field
+            elif field['field_id'] == FIELD_MAPPING["phone"]:
                 phone = field['values'][0]['value']
         
         if not patient_id:
@@ -240,7 +454,7 @@ class AmoCRMClient:
             return None
         
         # First, try to find by patient ID (primary key)
-        existing_contact = self.get_contact_by_custom_field(25, patient_id)
+        existing_contact = self.get_contact_by_custom_field(FIELD_MAPPING["patient_id"], patient_id)
         
         # If not found and phone exists, try to find by phone (secondary key)
         if not existing_contact and phone:

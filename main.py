@@ -1,216 +1,254 @@
-"""Main entry point for IDENT to AmoCRM synchronization."""
+"""Main entry point for IDENT to AmoCRM integration."""
 
+import argparse
 import sys
 import os
-import argparse
+from datetime import datetime, timedelta
 from loguru import logger
-from flask import Flask, request, jsonify
-import threading
 
-from config import app_config
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
 from src.sync import SyncManager
-from src.amocrm import AmoCRMClient
+from src.reception_sync import ReceptionSyncManager
+from config import app_config
 
 
-# Configure logging
-logger.remove()
-logger.add(
-    sys.stdout,
-    level=app_config.log_level,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
-)
-logger.add(
-    app_config.log_file,
-    level=app_config.log_level,
-    rotation="10 MB",
-    retention="30 days"
-)
+def setup_logging():
+    """Setup logging configuration."""
+    logger.remove()  # Remove default handler
+    
+    # Add console handler
+    logger.add(
+        sys.stdout,
+        level=app_config.log_level,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+        colorize=True
+    )
+    
+    # Add file handler
+    os.makedirs(os.path.dirname(app_config.log_file), exist_ok=True)
+    logger.add(
+        app_config.log_file,
+        level=app_config.log_level,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}",
+        rotation="1 day",
+        retention="30 days"
+    )
 
 
 def run_sync_service():
-    """Run the synchronization service."""
-    # Check if we should use mock client
-    use_mock = os.getenv('USE_MOCK_AMOCRM', 'false').lower() == 'true'
-    sync_manager = SyncManager(use_mock=use_mock)
-    sync_manager.run()
-
-
-def run_auth_server():
-    """Run OAuth callback server."""
-    app = Flask(__name__)
+    """Run the continuous synchronization service."""
+    logger.info("Starting IDENT to AmoCRM synchronization service")
     
-    @app.route('/callback')
-    def oauth_callback():
-        """Handle OAuth callback from AmoCRM."""
-        code = request.args.get('code')
-        if not code:
-            return jsonify({'error': 'No authorization code provided'}), 400
+    try:
+        sync_manager = SyncManager()
+        sync_manager.run()
+    except KeyboardInterrupt:
+        logger.info("Service interrupted by user")
+    except Exception as e:
+        logger.error(f"Service failed: {e}")
+        sys.exit(1)
+
+
+def run_full_sync():
+    """Run a one-time full synchronization."""
+    logger.info("Running one-time full synchronization")
+    
+    try:
+        sync_manager = SyncManager()
+        sync_manager.full_sync()
+        logger.info("Full synchronization completed successfully")
+    except Exception as e:
+        logger.error(f"Full sync failed: {e}")
+        sys.exit(1)
+
+
+def run_incremental_sync():
+    """Run a one-time incremental synchronization."""
+    logger.info("Running one-time incremental synchronization")
+    
+    try:
+        sync_manager = SyncManager()
+        sync_manager.incremental_sync()
+        logger.info("Incremental synchronization completed successfully")
+    except Exception as e:
+        logger.error(f"Incremental sync failed: {e}")
+        sys.exit(1)
+
+
+def test_patient_sync(patient_id: int):
+    """Test synchronization of a single patient."""
+    logger.info(f"Testing patient synchronization for patient ID: {patient_id}")
+    
+    try:
+        sync_manager = SyncManager(use_mock=True)
+        success = sync_manager.sync_single_patient(patient_id)
         
-        # Authenticate with the code
-        client = AmoCRMClient()
-        if client.authenticate_with_code(code):
-            return jsonify({'status': 'success', 'message': 'Authentication successful'}), 200
+        if success:
+            logger.info(f"Patient {patient_id} synchronized successfully")
         else:
-            return jsonify({'error': 'Authentication failed'}), 500
+            logger.error(f"Failed to synchronize patient {patient_id}")
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"Test patient sync failed: {e}")
+        sys.exit(1)
+
+
+def test_reception_sync(reception_id: int):
+    """Test synchronization of a single reception."""
+    logger.info(f"Testing reception synchronization for reception ID: {reception_id}")
     
-    @app.route('/health')
-    def health_check():
-        """Health check endpoint."""
-        return jsonify({'status': 'healthy'}), 200
+    try:
+        sync_manager = SyncManager(use_mock=True)
+        success = sync_manager.sync_single_reception(reception_id)
+        
+        if success:
+            logger.info(f"Reception {reception_id} synchronized successfully")
+        else:
+            logger.error(f"Failed to synchronize reception {reception_id}")
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"Test reception sync failed: {e}")
+        sys.exit(1)
+
+
+def run_reception_sync():
+    """Run reception synchronization."""
+    logger.info("Running reception synchronization")
     
-    logger.info("Starting OAuth callback server on port 8080")
-    app.run(host='0.0.0.0', port=8080)
+    try:
+        reception_sync = ReceptionSyncManager(use_mock=True)
+        results = reception_sync.sync_receptions()
+        
+        successful = sum(1 for r in results if r.success)
+        failed = len(results) - successful
+        
+        logger.info(f"Reception sync completed: {successful} successful, {failed} failed")
+        
+        # Log funnel distribution
+        primary_count = sum(1 for r in results if r.success and r.funnel_type and r.funnel_type.name == 'PRIMARY')
+        secondary_count = sum(1 for r in results if r.success and r.funnel_type and r.funnel_type.name == 'SECONDARY')
+        logger.info(f"Funnel distribution: {primary_count} primary, {secondary_count} secondary")
+        
+        if failed > 0:
+            sys.exit(1)
+            
+    except Exception as e:
+        logger.error(f"Reception sync failed: {e}")
+        sys.exit(1)
+
+
+def show_statistics():
+    """Show synchronization statistics."""
+    logger.info("Retrieving synchronization statistics")
+    
+    try:
+        sync_manager = SyncManager()
+        stats = sync_manager.get_sync_statistics()
+        
+        logger.info("=== Synchronization Statistics ===")
+        for key, value in stats.items():
+            if isinstance(value, datetime):
+                value = value.strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"{key}: {value}")
+            
+    except Exception as e:
+        logger.error(f"Failed to get statistics: {e}")
+        sys.exit(1)
 
 
 def test_database_connection():
     """Test database connection."""
-    logger.info("Testing database connection...")
+    logger.info("Testing database connection")
     
     try:
         from src.database import IdentDatabase
         
         with IdentDatabase() as db:
-            # Test basic query
-            db._cursor.execute("SELECT COUNT(*) as patient_count FROM Patients")
-            row = db._cursor.fetchone()
-            patient_count = row.patient_count if row else 0
+            # Test patient query
+            patients = db.get_all_patients(limit=1)
+            logger.info(f"Successfully connected to database. Found {len(patients)} test patients.")
             
-            logger.info(f"Database connection successful! Found {patient_count} patients.")
-            
-            # Test getting a few patients
-            patients = db.get_all_patients(limit=3)
-            logger.info(f"Sample patients:")
-            for patient in patients:
-                logger.info(f"  - {patient._format_name()} (ID: {patient.id_patient})")
-            
-            return True
+            # Test reception query
+            receptions = db.get_receptions()
+            logger.info(f"Found {len(receptions)} receptions in database.")
             
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
-        return False
+        logger.error(f"Database connection test failed: {e}")
+        sys.exit(1)
 
 
-def test_integration():
-    """Test the full integration flow."""
-    logger.info("Starting integration test...")
-    
-    # Test database connection first
-    if not test_database_connection():
-        logger.error("Database test failed, stopping integration test")
-        return False
-    
-    # Test sync with mock AmoCRM
-    logger.info("Testing sync with Mock AmoCRM...")
+def test_amocrm_connection():
+    """Test AmoCRM connection."""
+    logger.info("Testing AmoCRM connection")
     
     try:
-        # Force use of mock client
-        os.environ['USE_MOCK_AMOCRM'] = 'true'
+        from src.amocrm import AmoCRMClient
         
-        sync_manager = SyncManager(use_mock=True)
+        client = AmoCRMClient()
+        fields = client.get_custom_fields()
+        logger.info(f"Successfully connected to AmoCRM. Found {len(fields)} custom fields.")
         
-        # Test syncing first patient
-        success = sync_manager.sync_single_patient(1)
-        
-        if success:
-            logger.info("✅ Integration test passed!")
-            
-            # Show mock statistics
-            if hasattr(sync_manager.amocrm, 'get_stats'):
-                stats = sync_manager.amocrm.get_stats()
-                logger.info(f"Mock AmoCRM Statistics:")
-                logger.info(f"  - Total contacts: {stats['total_contacts']}")
-                logger.info(f"  - API calls made: {stats['api_calls']}")
-                logger.info(f"  - Created contacts: {len(stats['contacts'])}")
-                
-                for contact in stats['contacts']:
-                    logger.info(f"    * {contact['name']} (ID: {contact['id']})")
-            
-            return True
-        else:
-            logger.error("❌ Integration test failed!")
-            return False
-            
     except Exception as e:
-        logger.error(f"Integration test error: {e}")
-        return False
+        logger.error(f"AmoCRM connection test failed: {e}")
+        sys.exit(1)
 
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='IDENT to AmoCRM Synchronization')
-    parser.add_argument(
-        'command',
-        choices=['sync', 'auth', 'test', 'test-db', 'test-integration'],
-        help='Command to run'
-    )
-    parser.add_argument(
-        '--patient-id',
-        type=int,
-        help='Patient ID for test sync'
-    )
-    parser.add_argument(
-        '--use-mock',
-        action='store_true',
-        help='Use mock AmoCRM client for testing'
-    )
+    parser = argparse.ArgumentParser(description="IDENT to AmoCRM Integration")
+    
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Service command
+    subparsers.add_parser('service', help='Run continuous synchronization service')
+    
+    # Sync commands
+    subparsers.add_parser('full-sync', help='Run one-time full synchronization')
+    subparsers.add_parser('incremental-sync', help='Run one-time incremental synchronization')
+    subparsers.add_parser('reception-sync', help='Run reception synchronization')
+    
+    # Test commands
+    test_patient_parser = subparsers.add_parser('test-patient', help='Test single patient synchronization')
+    test_patient_parser.add_argument('patient_id', type=int, help='Patient ID to test')
+    
+    test_reception_parser = subparsers.add_parser('test-reception', help='Test single reception synchronization')
+    test_reception_parser.add_argument('reception_id', type=int, help='Reception ID to test')
+    
+    # Info commands
+    subparsers.add_parser('stats', help='Show synchronization statistics')
+    subparsers.add_parser('test-db', help='Test database connection')
+    subparsers.add_parser('test-amocrm', help='Test AmoCRM connection')
     
     args = parser.parse_args()
     
-    # Set mock mode if requested
-    if args.use_mock:
-        os.environ['USE_MOCK_AMOCRM'] = 'true'
+    # Setup logging
+    setup_logging()
     
-    if args.command == 'sync':
-        logger.info("Starting synchronization service")
+    # Execute command
+    if args.command == 'service':
         run_sync_service()
-        
-    elif args.command == 'auth':
-        logger.info("Starting authentication server")
-        logger.info("Please visit the following URL to authenticate:")
-        
-        client = AmoCRMClient()
-        auth_url = (
-            f"https://{client.subdomain}.amocrm.ru/oauth"
-            f"?mode=request"
-            f"&client_id={client.client_id}"
-            f"&redirect_uri={client.redirect_uri}"
-            f"&response_type=code"
-        )
-        logger.info(auth_url)
-        
-        run_auth_server()
-        
-    elif args.command == 'test':
-        if not args.patient_id:
-            logger.error("Patient ID is required for test sync")
-            sys.exit(1)
-        
-        logger.info(f"Running test sync for patient {args.patient_id}")
-        
-        # Force mock mode for individual tests
-        os.environ['USE_MOCK_AMOCRM'] = 'true'
-        sync_manager = SyncManager(use_mock=True)
-        success = sync_manager.sync_single_patient(args.patient_id)
-        
-        if success:
-            logger.info("Test sync completed successfully")
-        else:
-            logger.error("Test sync failed")
-            sys.exit(1)
-    
+    elif args.command == 'full-sync':
+        run_full_sync()
+    elif args.command == 'incremental-sync':
+        run_incremental_sync()
+    elif args.command == 'reception-sync':
+        run_reception_sync()
+    elif args.command == 'test-patient':
+        test_patient_sync(args.patient_id)
+    elif args.command == 'test-reception':
+        test_reception_sync(args.reception_id)
+    elif args.command == 'stats':
+        show_statistics()
     elif args.command == 'test-db':
-        logger.info("Testing database connection only")
-        success = test_database_connection()
-        
-        if not success:
-            sys.exit(1)
-    
-    elif args.command == 'test-integration':
-        logger.info("Running full integration test")
-        success = test_integration()
-        
-        if not success:
-            sys.exit(1)
+        test_database_connection()
+    elif args.command == 'test-amocrm':
+        test_amocrm_connection()
+    else:
+        parser.print_help()
 
 
 if __name__ == '__main__':

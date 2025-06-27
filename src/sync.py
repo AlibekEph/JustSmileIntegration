@@ -13,6 +13,7 @@ from src.database import IdentDatabase
 from src.amocrm import AmoCRMClient
 from src.test_amocrm import MockAmoCRMClient
 from src.models import Patient
+from src.reception_sync import ReceptionSyncManager
 
 
 class SyncManager:
@@ -30,11 +31,15 @@ class SyncManager:
             self.amocrm = AmoCRMClient()
             logger.info("Using Real AmoCRM Client")
             
+        # Initialize reception sync manager
+        self.reception_sync = ReceptionSyncManager(use_mock)
+            
         self.timezone = pytz.timezone(app_config.timezone)
         self.batch_size = sync_config.batch_size
         
         # Track sync state
         self.last_incremental_sync = None
+        self.last_reception_sync = None
         self.initial_sync_completed = False
     
     def run(self):
@@ -47,14 +52,18 @@ class SyncManager:
             self.full_sync()
             self.initial_sync_completed = True
         
-        # Schedule incremental syncs
+        # Schedule patient syncs
         schedule.every(sync_config.interval_minutes).minutes.do(self.incremental_sync)
+        
+        # Schedule reception syncs (more frequent)
+        schedule.every(1).minutes.do(self.incremental_reception_sync)
         
         # Schedule deep syncs
         schedule.every().day.at(f"{sync_config.deep_sync_hour_morning:02d}:00").do(self.deep_sync)
         schedule.every().day.at(f"{sync_config.deep_sync_hour_evening:02d}:00").do(self.deep_sync)
         
-        logger.info(f"Scheduled incremental sync every {sync_config.interval_minutes} minutes")
+        logger.info(f"Scheduled patient sync every {sync_config.interval_minutes} minutes")
+        logger.info(f"Scheduled reception sync every 1 minute")
         logger.info(f"Scheduled deep sync at {sync_config.deep_sync_hour_morning}:00 and {sync_config.deep_sync_hour_evening}:00")
         
         # Run the scheduler
@@ -70,27 +79,16 @@ class SyncManager:
                 time.sleep(60)  # Wait before retrying
     
     def full_sync(self):
-        """Perform full synchronization of all patients."""
+        """Perform full synchronization of all patients and receptions."""
         logger.info("Starting full synchronization")
         start_time = datetime.now()
         
         try:
-            with self.db as db:
-                # Get sync state
-                sync_state = db.get_sync_state()
-                
-                # Get all patients
-                patients = db.get_all_patients()
-                logger.info(f"Found {len(patients)} patients to sync")
-                
-                # Process in batches
-                for i in range(0, len(patients), self.batch_size):
-                    batch = patients[i:i + self.batch_size]
-                    self._process_patient_batch(batch, sync_state, db)
-                    
-                    # Log progress
-                    progress = min(i + self.batch_size, len(patients))
-                    logger.info(f"Processed {progress}/{len(patients)} patients")
+            # Sync patients first
+            self._full_patient_sync()
+            
+            # Then sync receptions
+            self._full_reception_sync()
             
             duration = datetime.now() - start_time
             logger.info(f"Full synchronization completed in {duration}")
@@ -104,9 +102,45 @@ class SyncManager:
             logger.error(f"Full sync failed: {e}")
             raise
     
+    def _full_patient_sync(self):
+        """Perform full patient synchronization."""
+        logger.info("Starting full patient synchronization")
+        
+        with self.db as db:
+            # Get sync state
+            sync_state = db.get_sync_state()
+            
+            # Get all patients
+            patients = db.get_all_patients()
+            logger.info(f"Found {len(patients)} patients to sync")
+            
+            # Process in batches
+            for i in range(0, len(patients), self.batch_size):
+                batch = patients[i:i + self.batch_size]
+                self._process_patient_batch(batch, sync_state, db)
+                
+                # Log progress
+                progress = min(i + self.batch_size, len(patients))
+                logger.info(f"Processed {progress}/{len(patients)} patients")
+    
+    def _full_reception_sync(self):
+        """Perform full reception synchronization."""
+        logger.info("Starting full reception synchronization")
+        
+        results = self.reception_sync.sync_receptions()
+        
+        successful = sum(1 for r in results if r.success)
+        failed = len(results) - successful
+        logger.info(f"Reception sync completed: {successful} successful, {failed} failed")
+        
+        # Log funnel distribution
+        primary_count = sum(1 for r in results if r.success and r.funnel_type and r.funnel_type.name == 'PRIMARY')
+        secondary_count = sum(1 for r in results if r.success and r.funnel_type and r.funnel_type.name == 'SECONDARY')
+        logger.info(f"Funnel distribution: {primary_count} primary, {secondary_count} secondary")
+    
     def incremental_sync(self):
-        """Perform incremental synchronization of changed records."""
-        logger.info("Starting incremental synchronization")
+        """Perform incremental synchronization of changed patient records."""
+        logger.info("Starting incremental patient synchronization")
         start_time = datetime.now()
         
         try:
@@ -133,10 +167,34 @@ class SyncManager:
             
             self.last_incremental_sync = start_time
             duration = datetime.now() - start_time
-            logger.info(f"Incremental synchronization completed in {duration}")
+            logger.info(f"Incremental patient synchronization completed in {duration}")
             
         except Exception as e:
-            logger.error(f"Incremental sync failed: {e}")
+            logger.error(f"Incremental patient sync failed: {e}")
+    
+    def incremental_reception_sync(self):
+        """Perform incremental synchronization of reception changes."""
+        try:
+            # Determine the time range for changes
+            if self.last_reception_sync:
+                since = self.last_reception_sync
+            else:
+                # Default to last hour for first reception sync
+                since = datetime.now() - timedelta(hours=1)
+            
+            start_time = datetime.now()
+            
+            results = self.reception_sync.sync_receptions(since)
+            
+            if results:
+                successful = sum(1 for r in results if r.success)
+                failed = len(results) - successful
+                logger.info(f"Incremental reception sync: {successful} successful, {failed} failed since {since}")
+            
+            self.last_reception_sync = start_time
+            
+        except Exception as e:
+            logger.error(f"Incremental reception sync failed: {e}")
     
     def deep_sync(self):
         """Perform deep synchronization (similar to full sync but scheduled)."""
@@ -296,6 +354,7 @@ class SyncManager:
                 patient.discount = db._get_patient_discount(row.ID_Patients)
                 patient.total_visits = db._get_patient_visits_count(row.ID_Patients)
                 patient.advance, patient.debt = db._get_patient_balance(row.ID_Patients)
+                patient.completed_receptions_count = db.get_patient_completed_receptions_count(row.ID_Patients)
                 
                 # Convert to AmoCRM format
                 amocrm_data = patient.to_amocrm_format()
@@ -322,4 +381,55 @@ class SyncManager:
                     
         except Exception as e:
             logger.error(f"Error syncing patient {patient_id}: {e}")
-            return False 
+            return False
+    
+    def sync_single_reception(self, reception_id: int) -> bool:
+        """Sync a single reception (useful for testing or manual sync)."""
+        logger.info(f"Syncing single reception: {reception_id}")
+        
+        try:
+            result = self.reception_sync.sync_single_reception_by_id(reception_id)
+            
+            if result.success:
+                logger.info(f"Successfully synced reception {reception_id}: "
+                          f"Contact {result.amocrm_contact_id}, Deal {result.amocrm_deal_id}, "
+                          f"Funnel {result.funnel_type.name if result.funnel_type else 'Unknown'}")
+                return True
+            else:
+                logger.error(f"Failed to sync reception {reception_id}: {result.error}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error syncing reception {reception_id}: {e}")
+            return False
+    
+    def get_sync_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive synchronization statistics."""
+        stats = {
+            "last_patient_sync": self.last_incremental_sync,
+            "last_reception_sync": self.last_reception_sync,
+            "initial_sync_completed": self.initial_sync_completed
+        }
+        
+        try:
+            # Get reception sync statistics
+            reception_stats = self.reception_sync.get_sync_statistics()
+            stats.update(reception_stats)
+            
+            # Get patient statistics
+            with self.db as db:
+                patients = db.get_all_patients()
+                stats["total_patients"] = len(patients)
+                
+                # Count funnel distribution
+                primary_count = sum(1 for p in patients if p.completed_receptions_count == 0)
+                secondary_count = len(patients) - primary_count
+                
+                stats["primary_funnel_patients"] = primary_count
+                stats["secondary_funnel_patients"] = secondary_count
+                
+        except Exception as e:
+            logger.error(f"Failed to get sync statistics: {e}")
+            stats["error"] = str(e)
+        
+        return stats 

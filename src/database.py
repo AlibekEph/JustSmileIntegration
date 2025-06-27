@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from config import db_config
-from src.models import Patient, Person, Gender, PatientStatus
+from src.models import Patient, Person, Gender, PatientStatus, Reception, ReceptionStatus
 
 
 class IdentDatabase:
@@ -120,6 +120,7 @@ class IdentDatabase:
             patient.discount = self._get_patient_discount(row.ID_Patients)
             patient.total_visits = self._get_patient_visits_count(row.ID_Patients)
             patient.advance, patient.debt = self._get_patient_balance(row.ID_Patients)
+            patient.completed_receptions_count = self.get_patient_completed_receptions_count(row.ID_Patients)
             
             patients.append(patient)
         
@@ -203,11 +204,151 @@ class IdentDatabase:
             patient.discount = self._get_patient_discount(row.ID_Patients)
             patient.total_visits = self._get_patient_visits_count(row.ID_Patients)
             patient.advance, patient.debt = self._get_patient_balance(row.ID_Patients)
+            patient.completed_receptions_count = self.get_patient_completed_receptions_count(row.ID_Patients)
             
             patients.append(patient)
         
         logger.info(f"Fetched {len(patients)} changed patients since {since}")
         return patients
+    
+    def get_receptions(self, since: Optional[datetime] = None) -> List[Reception]:
+        """Get receptions from both Receptions and ScheduledReceptions tables."""
+        completed_receptions = self._get_completed_receptions(since)
+        scheduled_receptions = self._get_scheduled_receptions(since)
+        
+        all_receptions = completed_receptions + scheduled_receptions
+        logger.info(f"Retrieved {len(all_receptions)} total receptions ({len(completed_receptions)} completed, {len(scheduled_receptions)} scheduled)")
+        
+        return all_receptions
+    
+    def _get_completed_receptions(self, since: Optional[datetime] = None) -> List[Reception]:
+        """Get completed receptions from Receptions table."""
+        query = """
+        SELECT 
+            r.ID,
+            r.ID_Patients,
+            r.ID_Staffs,
+            r.DateTimeChanged,
+            r.Comment,
+            p.PatientNumber,
+            per.MobilePhone,
+            per.Phone,
+            s.Surname + ' ' + s.Name as StaffName
+        FROM Receptions r
+        LEFT JOIN Patients p ON r.ID_Patients = p.ID_Patients
+        LEFT JOIN Persons per ON p.ID_Persons = per.ID
+        LEFT JOIN Staffs s ON r.ID_Staffs = s.ID
+        WHERE 1=1
+        """
+        
+        params = []
+        if since:
+            query += " AND r.DateTimeChanged >= ?"
+            params.append(since)
+        
+        query += " ORDER BY r.DateTimeChanged DESC"
+        
+        try:
+            self._cursor.execute(query, *params)
+            receptions = []
+            
+            for row in self._cursor.fetchall():
+                reception = Reception(
+                    id_reception=row.ID,
+                    id_patient=row.ID_Patients,
+                    patient_number=row.PatientNumber,
+                    phone=row.MobilePhone or row.Phone,
+                    staff_id=row.ID_Staffs,
+                    staff_name=row.StaffName,
+                    appointment_date=row.DateTimeChanged,
+                    comment=row.Comment,
+                    status=ReceptionStatus.COMPLETED,
+                    date_changed=row.DateTimeChanged
+                )
+                receptions.append(reception)
+            
+            logger.debug(f"Retrieved {len(receptions)} completed receptions")
+            return receptions
+            
+        except Exception as e:
+            logger.error(f"Failed to get completed receptions: {e}")
+            raise
+    
+    def _get_scheduled_receptions(self, since: Optional[datetime] = None) -> List[Reception]:
+        """Get scheduled receptions from ScheduledReceptions table."""
+        query = """
+        SELECT 
+            sr.ID_Receptions,
+            sr.ID_Patients,
+            sr.ID_Staffs,
+            sr.DateTimeAdded,
+            sr.DateTimeChanged,
+            sr.Comment,
+            sr.Length,
+            p.PatientNumber,
+            per.MobilePhone,
+            per.Phone,
+            s.Surname + ' ' + s.Name as StaffName
+        FROM ScheduledReceptions sr
+        LEFT JOIN Patients p ON sr.ID_Patients = p.ID_Patients
+        LEFT JOIN Persons per ON p.ID_Persons = per.ID
+        LEFT JOIN Staffs s ON sr.ID_Staffs = s.ID
+        WHERE sr.ID_ReceptionCancelReasons IS NULL  -- Not cancelled
+        """
+        
+        params = []
+        if since:
+            query += " AND (sr.DateTimeAdded >= ? OR sr.DateTimeChanged >= ?)"
+            params.extend([since, since])
+        
+        query += " ORDER BY sr.DateTimeChanged DESC"
+        
+        try:
+            self._cursor.execute(query, *params)
+            receptions = []
+            
+            for row in self._cursor.fetchall():
+                reception = Reception(
+                    id_reception=row.ID_Receptions,
+                    id_patient=row.ID_Patients,
+                    patient_number=row.PatientNumber,
+                    phone=row.MobilePhone or row.Phone,
+                    staff_id=row.ID_Staffs,
+                    staff_name=row.StaffName,
+                    appointment_date=row.DateTimeAdded,
+                    duration=row.Length,
+                    comment=row.Comment,
+                    status=ReceptionStatus.SCHEDULED,
+                    date_added=row.DateTimeAdded,
+                    date_changed=row.DateTimeChanged
+                )
+                receptions.append(reception)
+            
+            logger.debug(f"Retrieved {len(receptions)} scheduled receptions")
+            return receptions
+            
+        except Exception as e:
+            logger.error(f"Failed to get scheduled receptions: {e}")
+            raise
+    
+    def get_patient_completed_receptions_count(self, patient_id: int) -> int:
+        """Get count of completed receptions for a patient."""
+        query = """
+        SELECT COUNT(*) as reception_count
+        FROM Receptions 
+        WHERE ID_Patients = ?
+        """
+        
+        try:
+            self._cursor.execute(query, patient_id)
+            row = self._cursor.fetchone()
+            count = row.reception_count if row else 0
+            logger.debug(f"Patient {patient_id} has {count} completed receptions")
+            return count
+            
+        except Exception as e:
+            logger.error(f"Failed to get completed receptions count for patient {patient_id}: {e}")
+            return 0
     
     def _get_archive_reason(self, reason_id: Optional[int]) -> Optional[str]:
         """Get archive reason by ID."""
