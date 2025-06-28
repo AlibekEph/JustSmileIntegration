@@ -75,7 +75,7 @@ class AmoCRMClient:
         
         self.request_times.append(now)
     
-    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None, 
+    def _make_request(self, method: str, endpoint: str, data: Optional[Union[Dict, List]] = None, 
                      params: Optional[Dict] = None, retry_count: int = 0) -> Dict[str, Any]:
         """Make API request with automatic token refresh."""
         self._rate_limit()
@@ -233,7 +233,7 @@ class AmoCRMClient:
                 contact_id = contacts[0]['id'] if contacts else None
                 
                 return ContactSearchResult(
-                    contact_id=contact_id,
+                    contact_id=contact_id or 0,  # Provide default value
                     deal_id=deal['id'],
                     pipeline_id=deal['pipeline_id'],
                     stage_id=deal['status_id']
@@ -283,7 +283,7 @@ class AmoCRMClient:
                     contact_id = contacts[0]['id'] if contacts else None
                     
                     return ContactSearchResult(
-                        contact_id=contact_id,
+                        contact_id=contact_id or 0,  # Provide default value
                         deal_id=deal['id'],
                         pipeline_id=deal['pipeline_id'],
                         stage_id=deal['status_id']
